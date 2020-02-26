@@ -1,0 +1,240 @@
+---
+title: "Untitled"
+author: "Miles Rollison"
+date: "1/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=F)
+
+#library(reticulate)
+#Sys.setenv(RETICULATE_PYTHON =  ".venv/bin/python")
+
+library(tidyverse)
+library(magrittr)
+
+library(tidytext)
+library(tokenizers)
+library(stopwords)
+library(stringr)
+
+directory = function(x){paste0(fakepath, x)}
+```
+
+```{r functions}
+ngrams = function(text, n = 1, filter = 0.001){
+    text %>% 
+    as_tibble() %>% 
+    na.omit %>% 
+    tidytext::unnest_tokens(ngram, value, token = "ngrams", n = n) %>% 
+    plyr::count() %>%
+    arrange(freq %>% desc) %>%
+    mutate(prob = freq / sum(freq)) %>%
+    filter(prob >= filter) %>%
+    return   
+}
+
+get_dtm = function(df, column, terms, join = F, token_count = F, tfidf = F){ 
+  require(dplyr)  
+  column = deparse(substitute(column))
+  N = length(df[[column]])
+    if(!("id" %in% colnames(df))){ df$id = 1:nrow(df) }
+    dtm = data.frame(id = df["id"], text = df[[column]])
+    
+    for (i in terms) {
+        cn = gsub(' ', '_', i)
+        if(tfidf){
+          n = sum(stringr::str_detect(df[[column]], i)) 
+          idf = ifelse(n > 0, log(N/n), 0)
+        }
+        else idf = 1
+        dtm[[cn]] = idf * stringr::str_count(df[[column]], i)
+    }
+    if(token_count){
+        dtm %<>% mutate(token_count = dtm %>% select(-id, - text) %>% rowSums()) %>% 
+                 select(token_count, everything())
+    }
+    if(join){
+        colnames(dtm)[1] = column
+        dtm = full_join(df, dtm)
+    }
+  
+    return(dtm)
+}
+
+get_idf = function(documents, terms){
+  idf = data.frame(terms = terms)
+  N = length(documents)
+  n = c()
+  for(i in terms){
+    n[length(n) + 1] = sum(str_detect(documents, i))
+  }
+  
+  n = ifelse(n > 0, log(N/n), 0)
+  idf$inv_freq = n
+  return(idf)
+}
+
+```
+
+```{r import}
+start_time = Sys.time()
+
+beef = read_csv(directory("text analytics/Data/cattle_text.csv"))
+beef %<>% filter( !is.na(price))
+beef %<>% mutate(id = seq(1:nrow(beef))) %>% select(id, everything())
+beef %<>% rename(category = type)
+```
+
+```{r cleanup}
+
+sw = stopwords('en') %>% setdiff(c("no", "not"))
+sw = c(sw, "good", "nice", "very nice", "real nice")
+stopwords.re = paste(sw, collapse = '\\b|\\b')
+stopwords.re = paste0('\\b', stopwords.re, '\\b')
+
+beef %<>% mutate_if(is.character, tolower)
+
+beef$feed_oncows = beef$feed %>% str_detect("cow") %>% as.integer
+
+beef$feed_sw = beef$feed %>%
+    #tolower %>%
+    str_replace_all(stopwords.re, '') %>%
+    str_remove_all("[^[:alpha:] \\s]") %>%
+    trimws() %>%
+    gsub("\\bcows\\b|\\bcow\\b", '', .)
+
+beef$category %<>%
+    #tolower %>% 
+    gsub("s\\b|ee|ei|\\d", '', .) %>% 
+    gsub("er", "r", .) %>% 
+    gsub("ve", "f", .) %>% 
+    gsub("clf|cf", "calf", .) %>% 
+    gsub("hol|holst|holstn", "holstein", .)
+
+beef$comments_sw = beef$comments %>% 
+    str_replace_all(stopwords.re, '') %>%
+    gsub("year old|years old", "yearold", .) %>%
+    gsub("(<=?\\d) (?=yearold)", "", ., perl = T)  %>%
+    #gsub("(<=?steer)s|(<=?heifer)s", "", perl = T) %>%
+    gsub("1", "one", .) %>%
+    gsub("2", "two", .) %>%
+    gsub("3", "three", .) %>%
+    gsub("4", "four", .) %>%
+    gsub("\\bx\\b|-x", " cross ", .) %>%
+    gsub("[^[:alpha:] \\s]", '', .) %>% 
+    tm::stemDocument()
+
+  
+  beef$breed_sw = beef$breed %>% tolower %>% 
+    str_replace_all(stopwords.re, '') %>%
+    gsub("%", "pct", .) %>% gsub("pct ", "pct", .) %>% 
+    gsub("\\bx\\b|-x", " cross ", .) %>% 
+    gsub("\\b\\d\\b", '', .) %>% 
+    #gsub("bulls|cows", '', .) %>% 
+    gsub("\\bang\\b", "angus", .) %>% 
+    gsub("\\beng\\b", "english", .) %>% 
+    gsub("\\bhere\\b", "hereford", .) %>%
+    gsub("\\bgelb\\b", "gelbvieh", .) %>% 
+    gsub("\\bchar\\b", "charolais", .) %>% 
+    gsub("\\bsimm\\b", "simmental", .) %>%
+    gsub("\\blimo\\b", "limousin", .) %>%
+    gsub("bwf|rwf", "wf", .) %>% 
+    str_remove_all("[^[:alnum:] \\s]") %>% 
+    gsub("\\bno ", "no", .)
+    
+cleanup_time = Sys.time()
+start_time - cleanup_time
+```
+
+```{r}
+write_csv(beef, directory("text analytics/Data/cattle_description_nosw.csv"))
+```
+
+```{r tokens, warning=F}
+beef = read_csv( directory("text analytics/Data/cattle_description_nosw.csv"))
+
+unigrams_feed = beef$feed_sw %>% ngrams
+
+bigrams_feed = beef$feed_sw %>% gsub("cow|cows", '', .) %>% ngrams(2)
+    
+categories =  beef$category %>% ngrams
+
+unigrams_comments = beef$comments_sw %>% ngrams(filter = 0.001)
+bigrams_comments = beef$comments_sw %>% ngrams(2, filter = 0.001)
+#trigrams_comments = beef$comments_sw %>% ngrams(3, filter = 0)
+
+unigrams_comments %<>% mutate(in_bigrams = ngram %>% str_detect(bigrams_comments$ngram))
+
+
+
+ngrams_comments = unigrams_comments %>%
+  filter(in_bigrams == 0) %>%
+  select(ngram) %>% 
+  bind_rows(bigrams_comments %>% select(ngram))
+
+unigrams_breed = beef$breed_sw %>% ngrams(filter = 0)
+percentages = unigrams_breed %>% 
+  filter(str_detect(ngram, "pct"), prob > 0.003) %>%
+  arrange(freq %>% desc)
+percentages = percentages[-8,]
+
+breeds = c("angus", "cross", "charolais", "english", "hereford", 
+           "gelbvieh", "simmental", "exotic", "beefmaster", "brangus", "limousin", "saler",
+           "red", "blk", "wf", "broco", "no_horns", "horns", "no_ear", "ear", percentages$ngram)
+
+```
+
+```{r}
+for (i in categories$ngram) {  
+  cn = paste0(i, "_ohe")
+  beef[cn] = str_detect(beef$category, i) %>% as.integer()
+}
+
+beef$sheep = str_detect(beef$category, "lamb|ewe") %>% as.integer()
+beef %<>% filter(sheep == 0) %>% select(-sheep)
+
+beef %<>% mutate(gender = case_when(str_ohe == 1 ~ "str", 
+                                    hfr_ohe == 1 ~ "hfr", 
+                                    TRUE ~ "other"))
+
+beef %<>% group_by(year, month, market, gender, bred_ohe) %>%
+    mutate(premium = price - mean(price),
+           sd = sd(price),
+           z = premium/(sd + 0.000001),
+           large_dev = ifelse(z >= 2, 1, 0),
+           exceptional_dev = ifelse(z >= 2, 1, 0)) %>% 
+    select(price, premium, z, sd, large_dev, everything()) %>% 
+    arrange(year, month) %>% 
+  ungroup()
+```
+
+```{r}
+beef %<>% mutate(corpus = paste(comments_sw, breed_sw, feed_sw))
+  tokens = c(breeds, bigrams_feed$ngram, ngrams_comments$ngram) %>% tm::stemDocument()
+  
+    
+beef %<>% mutate(head_z = (head - mean(head)) / sd(head))
+
+df = beef %>% select(id, premium, z, large_dev, exceptional_dev,
+                     year, month, head_z, calf_ohe, str_ohe, hfr_ohe, bred_ohe, holstein_ohe) %>% 
+              rename(price_z = z) %>% na.omit
+
+tfidf = get_dtm(beef, corpus, tokens, tfidf = T)
+
+df_joined = df %>% left_join(tfidf %>% select(-text), by = "id")
+df_joined %<>% rename(year_date = year.x,
+                     year_term = year.y)
+```
+
+```{r}
+write_csv(df_joined, directory("text analytics/Cattle Descriptions/Data/cattle_tfidf.csv"))
+
+end_time = Sys.time()
+start_time - end_time
+```
+
+```{r}
+
+```
